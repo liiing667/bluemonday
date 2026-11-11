@@ -31,6 +31,7 @@ package bluemonday
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -85,14 +86,28 @@ func (p *Policy) SanitizeBytes(b []byte) []byte {
 // It returns a bytes.Buffer containing the HTML that has been sanitized by the
 // policy. Errors during sanitization will merely return an empty result.
 func (p *Policy) SanitizeReader(r io.Reader) *bytes.Buffer {
-	return p.sanitizeWithBuff(r)
+	return p.sanitizeReaderWithBuff(r)
 }
 
 // SanitizeReaderToWriter takes an io.Reader that contains a HTML fragment or document
 // and applies the given policy allowlist and writes to the provided writer returning
 // an error if there is one.
-func (p *Policy) SanitizeReaderToWriter(r io.Reader, w io.Writer) error {
-	return p.sanitize(r, w)
+//
+// An optional SanitizeBudget may be supplied to bound the input, the number of
+// processed tokens, and the output. For convenience, three integer arguments
+// are also accepted as inputBytes, nodeCount and outputBytes. Without a budget
+// the configured policy budget is used, and the default policy budget is
+// unlimited.
+//
+// The output is staged in memory and only copied to w after the complete input
+// has been processed successfully. A budget overrun or input read failure
+// therefore does not leave partial sanitized output in w.
+func (p *Policy) SanitizeReaderToWriter(r io.Reader, w io.Writer, budgets ...interface{}) error {
+	budget, err := budgetFromArgs(p.sanitizeBudget, budgets)
+	if err != nil {
+		return err
+	}
+	return p.sanitizeWithBudget(r, w, budget)
 }
 
 // Query represents a single part of the query string, a query param
@@ -185,7 +200,17 @@ func sanitizedURL(val string) (string, error) {
 // Performs the actual sanitization process.
 func (p *Policy) sanitizeWithBuff(r io.Reader) *bytes.Buffer {
 	var buff bytes.Buffer
-	if err := p.sanitize(r, &buff); err != nil {
+	// Sanitize and SanitizeBytes retain their historical unlimited behaviour.
+	// Budgets only apply to the explicit streaming APIs.
+	if err := p.sanitizeWithBudget(r, &buff, SanitizeBudget{}); err != nil {
+		return &bytes.Buffer{}
+	}
+	return &buff
+}
+
+func (p *Policy) sanitizeReaderWithBuff(r io.Reader) *bytes.Buffer {
+	var buff bytes.Buffer
+	if err := p.sanitizeWithBudget(r, &buff, p.sanitizeBudget); err != nil {
 		return &bytes.Buffer{}
 	}
 	return &buff
@@ -200,6 +225,10 @@ func (a *asStringWriter) WriteString(s string) (int, error) {
 }
 
 func (p *Policy) sanitize(r io.Reader, w io.Writer) error {
+	return p.sanitizeWithBudget(r, w, p.sanitizeBudget)
+}
+
+func (p *Policy) sanitizeWithBudget(r io.Reader, w io.Writer, budget SanitizeBudget) error {
 	// It is possible that the developer has created the policy via:
 	//   p := bluemonday.Policy{}
 	// rather than:
@@ -208,6 +237,31 @@ func (p *Policy) sanitize(r io.Reader, w io.Writer) error {
 	// would initialize the maps, then we need to do that.
 	p.init()
 
+	if w == nil {
+		return &WriteError{Err: errors.New("nil writer")}
+	}
+	if r == nil {
+		return &ReadError{Err: errors.New("nil reader")}
+	}
+
+	input := &budgetReader{reader: r, limit: budget.inputLimit()}
+	nodes := &nodeBudget{limit: budget.nodeLimit()}
+
+	var staged bytes.Buffer
+	output := &budgetWriter{writer: &staged, limit: budget.outputLimit()}
+
+	if err := p.sanitizeTokens(input, output, nodes); err != nil {
+		return err
+	}
+
+	if _, err := staged.WriteTo(w); err != nil {
+		return &WriteError{Err: err}
+	}
+
+	return nil
+}
+
+func (p *Policy) sanitizeTokens(r io.Reader, w io.Writer, nodes *nodeBudget) error {
 	buff, ok := w.(stringWriterWriter)
 	if !ok {
 		buff = &asStringWriter{w}
@@ -230,7 +284,15 @@ func (p *Policy) sanitize(r io.Reader, w io.Writer) error {
 				return nil
 			}
 
-			// Raw tokenizer error
+			var limitErr *LimitError
+			if errors.As(err, &limitErr) {
+				return limitErr
+			}
+
+			return &ReadError{Err: err}
+		}
+
+		if err := nodes.next(); err != nil {
 			return err
 		}
 

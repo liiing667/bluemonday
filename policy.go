@@ -51,6 +51,10 @@ type Policy struct {
 	// exceptions
 	initialized bool
 
+	// Budgets applied by SanitizeReaderToWriter. The zero value means that
+	// sanitization is unlimited, which is the default.
+	sanitizeBudget SanitizeBudget
+
 	// If true then we add spaces when stripping tags, specifically the closing
 	// tag is replaced by a space character.
 	addSpaces bool

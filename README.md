@@ -105,6 +105,27 @@ p.SanitizeReader(io.Reader) bytes.Buffer
 
 If you are obsessed about performance, `p.SanitizeReader(r).Bytes()` will return a `[]byte` without performing any unnecessary casting of the inputs or outputs. Though the difference is so negligible you should never need to care.
 
+For streaming sanitization, `p.SanitizeReaderToWriter(r, w)` writes the
+sanitized result to a writer. You can bound the amount of work it performs with a
+`bluemonday.SanitizeBudget`:
+
+```go
+budget := bluemonday.SanitizeBudget{
+	MaxInputBytes:  1 << 20,
+	MaxNodes:       10000,
+	MaxOutputBytes: 1 << 20,
+}
+err := p.SanitizeReaderToWriter(input, output, budget)
+```
+
+A zero budget is unlimited, which is also the default. Budget overruns are
+reported through `bluemonday.ErrInputLimitExceeded`,
+`bluemonday.ErrNodeLimitExceeded` and `bluemonday.ErrOutputLimitExceeded`
+(and match `bluemonday.ErrBudgetExceeded`). Reader failures match
+`bluemonday.ErrReadFailed`. The output is staged and only written after the
+complete input has been sanitized, so a failed call does not leave partially
+sanitized output behind.
+
 You can build your own policies:
 ```go
 package main
