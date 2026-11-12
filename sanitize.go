@@ -630,6 +630,7 @@ attrsLoop:
 
 				if hrefFound {
 					var (
+						relFound         bool
 						noFollowFound    bool
 						noReferrerFound  bool
 						targetBlankFound bool
@@ -648,16 +649,22 @@ attrsLoop:
 					for _, htmlAttr := range cleanAttrs {
 
 						var appended bool
-						if htmlAttr.Key == "rel" && (addNoFollow || addNoReferrer) {
-
-							if addNoFollow && !strings.Contains(htmlAttr.Val, "nofollow") {
-								htmlAttr.Val += " nofollow"
+						if htmlAttr.Key == "rel" {
+							// Always retain an existing rel attribute so that
+							// the noopener processing below can see it, even
+							// when nofollow/noreferrer are not required
+							required := []string{}
+							if addNoFollow {
+								required = append(required, "nofollow")
 							}
-							if addNoReferrer && !strings.Contains(htmlAttr.Val, "noreferrer") {
-								htmlAttr.Val += " noreferrer"
+							if addNoReferrer {
+								required = append(required, "noreferrer")
 							}
-							noFollowFound = addNoFollow
-							noReferrerFound = addNoReferrer
+							var present map[string]bool
+							htmlAttr.Val, present = mergeRelTokens(htmlAttr.Val, required...)
+							relFound = true
+							noFollowFound = present["nofollow"]
+							noReferrerFound = present["noreferrer"]
 							tmpAttrs = append(tmpAttrs, htmlAttr)
 							appended = true
 						}
@@ -678,11 +685,13 @@ attrsLoop:
 							tmpAttrs = append(tmpAttrs, htmlAttr)
 						}
 					}
-					if noFollowFound || noReferrerFound || targetBlankFound {
+					if len(tmpAttrs) > 0 {
 						cleanAttrs = tmpAttrs
 					}
 
-					if (addNoFollow && !noFollowFound) || (addNoReferrer && !noReferrerFound) {
+					if !relFound &&
+						((addNoFollow && !noFollowFound) ||
+							(addNoReferrer && !noReferrerFound)) {
 						rel := html.Attribute{}
 						rel.Key = "rel"
 						if addNoFollow {
@@ -727,14 +736,9 @@ attrsLoop:
 						for _, htmlAttr := range cleanAttrs {
 							var appended bool
 							if htmlAttr.Key == "rel" {
-								if strings.Contains(htmlAttr.Val, "noopener") {
-									noOpenerAdded = true
-									tmpAttrs = append(tmpAttrs, htmlAttr)
-								} else {
-									htmlAttr.Val += " noopener"
-									noOpenerAdded = true
-									tmpAttrs = append(tmpAttrs, htmlAttr)
-								}
+								htmlAttr.Val, _ = mergeRelTokens(htmlAttr.Val, "noopener")
+								noOpenerAdded = true
+								tmpAttrs = append(tmpAttrs, htmlAttr)
 
 								appended = true
 							}
@@ -1005,6 +1009,51 @@ func stringInSlice(needle string, haystack []string) bool {
 		}
 	}
 	return false
+}
+
+// mergeRelTokens merges the whitespace separated rel tokens found in existing
+// with any required tokens and returns the resulting space separated rel value
+// along with a map of the required tokens that were already present.
+//
+// Tokens are compared case insensitively so that e.g. "NoFollow" satisfies a
+// requirement for "nofollow". Tokens that are not part of required are kept
+// verbatim, duplicate tokens (regardless of case) are collapsed to their first
+// occurrence, required tokens are emitted in their canonical lower case form
+// (replacing any case variant in the input), and any missing required token
+// is appended.
+func mergeRelTokens(existing string, required ...string) (string, map[string]bool) {
+	seen := map[string]bool{}
+	tokens := []string{}
+
+	requiredSet := map[string]bool{}
+	for _, token := range required {
+		requiredSet[strings.ToLower(token)] = true
+	}
+
+	for _, token := range strings.Fields(existing) {
+		key := strings.ToLower(token)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if requiredSet[key] {
+			token = key
+		}
+		tokens = append(tokens, token)
+	}
+
+	present := map[string]bool{}
+	for _, token := range required {
+		key := strings.ToLower(token)
+		present[key] = seen[key]
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		tokens = append(tokens, key)
+	}
+
+	return strings.Join(tokens, " "), present
 }
 
 func isDataAttribute(val string) bool {

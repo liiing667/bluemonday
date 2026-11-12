@@ -1372,6 +1372,7 @@ func TestTargetBlankNoOpener(t *testing.T) {
 	p := UGCPolicy()
 	p.AddTargetBlankToFullyQualifiedLinks(true)
 	p.AllowAttrs("target").Matching(Paragraph).OnElements("a")
+	p.AllowAttrs("rel").Matching(SpaceSeparatedTokens).OnElements("a")
 
 	tests := []test{
 		{
@@ -1400,15 +1401,33 @@ func TestTargetBlankNoOpener(t *testing.T) {
 		},
 		{
 			in:       `<a href="https://www.google.com/" rel="noopener"/>`,
-			expected: `<a href="https://www.google.com/" rel="nofollow noopener" target="_blank"/>`,
+			expected: `<a href="https://www.google.com/" rel="noopener nofollow" target="_blank"/>`,
 		},
 		{
 			in:       `<a href="https://www.google.com/" rel="noopener nofollow" />`,
-			expected: `<a href="https://www.google.com/" rel="nofollow noopener" target="_blank"/>`,
+			expected: `<a href="https://www.google.com/" rel="noopener nofollow" target="_blank"/>`,
 		},
 		{
 			in:       `<a href="https://www.google.com/" target="foo" />`,
 			expected: `<a href="https://www.google.com/" target="_blank" rel="nofollow noopener"/>`,
+		},
+		{
+			// A token that merely contains the required token name must not
+			// satisfy the requirement; case variants are normalised, and the
+			// missing safe token is appended while unknown tokens are preserved
+			in:       `<a href="https://www.google.com/" target="_blank" rel="nofollowing NoOpener nofollow" />`,
+			expected: `<a href="https://www.google.com/" target="_blank" rel="nofollowing noopener nofollow"/>`,
+		},
+		{
+			// Required tokens are matched case insensitively, normalised and
+			// deduplicated; unknown tokens keep their original place and case
+			in:       `<a href="https://www.google.com/" rel="external NoFollow NOFOLLOW" />`,
+			expected: `<a href="https://www.google.com/" rel="external nofollow noopener" target="_blank"/>`,
+		},
+		{
+			// A suffix spoof on the rel token must not hide the missing noopener
+			in:       `<a href="https://www.google.com/" target="_blank" rel="noopenerx" />`,
+			expected: `<a href="https://www.google.com/" target="_blank" rel="noopenerx nofollow noopener"/>`,
 		},
 	}
 
@@ -3670,6 +3689,16 @@ func TestIssue85(t *testing.T) {
 		{
 			in:       `<a href="https://www.google.com/" rel="external"/>`,
 			expected: `<a href="https://www.google.com/" rel="external nofollow noreferrer noopener" target="_blank"/>`,
+		},
+		{
+			// Substring spoofs must not be treated as existing safe tokens
+			in:       `<a href="https://www.google.com/" rel="nofollowing noreferrerx noopenerx"/>`,
+			expected: `<a href="https://www.google.com/" rel="nofollowing noreferrerx noopenerx nofollow noreferrer noopener" target="_blank"/>`,
+		},
+		{
+			// Case insensitive matching plus deduplication; unknown values kept
+			in:       `<a href="https://www.google.com/" target="_blank" rel="external NoFollow NOFOLLOW NoReferrer"/>`,
+			expected: `<a href="https://www.google.com/" target="_blank" rel="external nofollow noreferrer noopener"/>`,
 		},
 	}
 
